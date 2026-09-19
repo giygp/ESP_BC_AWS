@@ -673,11 +673,11 @@ void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
     
 
     char send_json_value[1024] = {0};
-    printf("report %d\n",type);
+    //printf("report %d\n",type);
     switch (type)
     {
     case 0x04:
-    printf("report %d\n",type);
+    //printf("report %d\n",type);
         m_cli_command_de = (qs_pb_msg_cli_command *)malloc(sizeof(qs_pb_msg_cli_command));
         memset(m_cli_command_de, 0, sizeof(qs_pb_msg_cli_command));
         ret = qs_pb_cli_command_decode((char *)value, len, m_cli_command_de);
@@ -694,7 +694,7 @@ void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
                     printf("get hello and set addr 3\n");
                 }
             */
-            printf("在再再在 cli_command_de cmd = %s\n",m_cli_command_de->command);
+            //printf("在再再在 cli_command_de cmd = %s\n",m_cli_command_de->command);
         }
         free(m_cli_command_de);
         break;

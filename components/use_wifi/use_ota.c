@@ -19,6 +19,7 @@
 #include "esp_https_ota.h"
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
+#include "esp_crt_bundle.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "use_ota.h"
@@ -145,7 +146,7 @@ void advanced_ota_example_task(void *pvParameter)
     esp_http_client_config_t config = {
         .url = device_info->ota.url,
         .event_handler = _http_event_handler,
-        .cert_pem = (char *)ca_root_cert,
+        .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = CONFIG_EXAMPLE_OTA_RECV_TIMEOUT,
         .keep_alive_enable = true,
     };
@@ -430,7 +431,7 @@ static esp_err_t sensor_fw_http_download(const char *url, uint8_t **out_buf, siz
     esp_http_client_config_t cfg = {
         .url = url,
         .event_handler = _http_event_handler,
-        .cert_pem = (char *)ca_root_cert,
+        .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = CONFIG_EXAMPLE_OTA_RECV_TIMEOUT,
         .keep_alive_enable = true,
     };

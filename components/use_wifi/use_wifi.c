@@ -67,8 +67,18 @@ char user_cli_data_subscribe_topic[64] = {0};
 char user_cli_data_publish_topic[64] = {0};
 char ota_upgrade_subscribe_topic[64] = {0};
 char mqtt_connect_aliyun_url[64] = {0};
+char mqtt_connect_aws_url[64] = {0};
 /** mqtts://host:端口（文档：8883 自签 CA / 1883+TLS 等与控制台一致），生命周期需覆盖 MQTT 客户端存续期 */
 static char s_mqtt_uri[128];
+static uint8_t s_aws_mqtt_mode = 0;
+
+/* AWS IoT mutual-TLS certs (embedded via main/CMakeLists.txt EMBED_TXTFILES) */
+extern const uint8_t aws_root_ca_pem_start[] asm("_binary_AmazonRootCA1_pem_start");
+extern const uint8_t aws_root_ca_pem_end[]   asm("_binary_AmazonRootCA1_pem_end");
+extern const uint8_t aws_dev_cert_start[]    asm("_binary_KSPSBED00010007_cert_pem_start");
+extern const uint8_t aws_dev_cert_end[]      asm("_binary_KSPSBED00010007_cert_pem_end");
+extern const uint8_t aws_dev_key_start[]     asm("_binary_KSPSBED00010007_private_key_start");
+extern const uint8_t aws_dev_key_end[]       asm("_binary_KSPSBED00010007_private_key_end");
 char mc_cli_data_subscribe_topic[64] = {0};
 char mc_cli_data_publish_topic[64] = {0};
 static const char s_mqtt_ca_cert[] =
@@ -382,6 +392,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             set_one_key_config_wifi_status(0);  
         }
         set_mqtt_status(1);
+        if (s_aws_mqtt_mode) {
+            sprintf(user_5s_data_publish_topic,     "%s/user/5s/put",      device_info->id);
+            sprintf(user_60s_data_publish_topic,    "%s/user/60s/put",     device_info->id);
+            sprintf(user_sa_data_publish_topic,     "%s/user/sa/put",      device_info->id);
+            sprintf(user_sleep_data_publish_topic,  "%s/user/sleep/put",   device_info->id);
+            sprintf(user_airbag_publish_topic,      "%s/user/airbag/put",  device_info->id);
+            sprintf(user_cli_data_subscribe_topic,  "%s/user/cli/get",     device_info->id);
+            sprintf(user_cli_data_publish_topic,    "%s/user/cli/put",     device_info->id);
+            sprintf(ota_upgrade_subscribe_topic,    "%s/ota/upgrade/get",  device_info->id);
+            sprintf(ota_infor_publish_topic,        "%s/ota/inform/put",   device_info->id);
+            sprintf(ota_progress_publish_topic,     "%s/ota/progress/put", device_info->id);
+            sprintf(mc_cli_data_subscribe_topic,    "%s/user/cli/get",     device_info->id);
+            sprintf(mc_cli_data_publish_topic,      "%s/user/mccli/put",   device_info->id);
+        } else {
         sprintf(user_5s_data_publish_topic, "/%s/%s/user/5s/put", device_info->aliyun.product_key, device_info->aliyun.device_id);
         sprintf(user_60s_data_publish_topic, "/%s/%s/user/60s/put", device_info->aliyun.product_key, device_info->aliyun.device_id);
         sprintf(user_sa_data_publish_topic, "/%s/%s/user/sa/put", device_info->aliyun.product_key, device_info->aliyun.device_id);
@@ -397,6 +421,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
         sprintf(mc_cli_data_subscribe_topic, "/%s/%s/user/cli/get", device_info->aliyun.product_key, device_info->aliyun.device_id); // mcli 合并到cil中了  
         sprintf(mc_cli_data_publish_topic, "/%s/%s/user/mccli/put", device_info->aliyun.product_key, device_info->aliyun.device_id);
+        }
         printf("%s\n", user_5s_data_publish_topic);
         printf("%s\n", user_60s_data_publish_topic);
         printf("%s\n", user_sa_data_publish_topic);
@@ -835,6 +860,39 @@ void aliyun_mqtt_server(void)
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
 }
 
+void aws_mqtt_server(void)
+{
+    char clientid[64] = {0};
+
+    s_aws_mqtt_mode = 1;
+    strncpy(mqtt_connect_aws_url, "airykrld1d7awu3.ats.iot.cn-north-1.amazonaws.com.cn",
+            sizeof(mqtt_connect_aws_url) - 1);
+    mqtt_connect_aws_url[sizeof(mqtt_connect_aws_url) - 1] = '\0';
+
+    snprintf(clientid, sizeof(clientid), "%s", device_info->id);
+
+    if (snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtts://%s:%d",
+                 mqtt_connect_aws_url, 8883) >= (int)sizeof(s_mqtt_uri)) {
+        ESP_LOGE(TAG, "mqtt uri too long");
+    }
+    ESP_LOGI(TAG, "AWS IoT uri=%s clientid=%s", s_mqtt_uri, clientid);
+
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .uri = s_mqtt_uri,
+        .client_id = clientid,
+        /* AWS IoT uses mutual TLS, no username/password */
+        .cert_pem = (const char *)aws_root_ca_pem_start,
+        .client_cert_pem = (const char *)aws_dev_cert_start,
+        .client_key_pem = (const char *)aws_dev_key_start,
+        .buffer_size = 1024,
+        .task_stack = 1024 * 20,
+        .keepalive = 300,
+    };
+
+    client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
+}
+
 void use_wifi_mqtt_init_and_start_after_time_sync(void)
 {
     /* 涂鸦 aiotMqttSign 使用 gettimeofday 毫秒时间戳；SNTP 前签名会导致 timestamp 错误、连接后很快被踢 */
@@ -843,7 +901,7 @@ void use_wifi_mqtt_init_and_start_after_time_sync(void)
         esp_mqtt_client_destroy(client);
         client = NULL;
     }
-    aliyun_mqtt_server();
+    aws_mqtt_server();
     if (client == NULL) {
         ESP_LOGE(TAG, "MQTT client init failed");
         return;

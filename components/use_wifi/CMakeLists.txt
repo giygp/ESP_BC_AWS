@@ -1,8 +1,11 @@
 idf_component_register(SRCS "use_wifi.c"
                             "aiot_mqtt_sign.c"
-                            "use_ota.c"
+                    "use_ota.c"
+                    EMBED_TXTFILES "certs/AmazonRootCA1.pem"
+                                   "certs/KSPSBED00010007.cert.pem"
+                                   "certs/KSPSBED00010007.private.key"
                     INCLUDE_DIRS "."
                                 "../common"
                                 "../app_control"
-                    REQUIRES nvs_flash mqtt json spi_flash fatfs app_update esp_http_client esp_https_ota esp-tls
+                    REQUIRES nvs_flash mqtt json spi_flash fatfs app_update esp_http_client esp_https_ota esp-tls mbedtls
                     )
