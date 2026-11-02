@@ -1,7 +1,7 @@
 {
   "C_Cpp.intelliSenseEngine": "Tag Parser",
   "idf.flashType": "UART",
-  "idf.port": "/dev/ttyUSB0",
+  "idf.port": "COM18",
   "files.associations": {
     "esp_adc_cal.h": "c",
     "esp_log.h": "c",
@@ -90,8 +90,12 @@
   },
   "idf.adapterTargetName": "esp32",
   "idf.portWin": "COM10",
-  "idf.espIdfPathWin": "D:/Espressif/frameworks/esp-idf-v4.4.8/",
-  "idf.toolsPathWin": "D:\\Espressif",
-  "idf.pythonInstallPath": "D:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
-  "idf.currentSetup": "D:/esp/v4.4.8/Espressif/frameworks/esp-idf-v4.4.8/"
+  "idf.customExtraPaths": "E:\\esp\\v4.4.8\\tools\\cmake\\3.23.1\\bin;E:\\esp\\v4.4.8\\tools\\ninja\\1.10.2;E:\\esp\\v4.4.8\\tools\\xtensa-esp32-elf\\esp-2021r2-patch5-8.4.0\\xtensa-esp32-elf\\bin;E:\\esp\\v4.4.8\\tools\\ccache\\4.3\\ccache-4.3-windows-64;E:\\esp\\v4.4.8\\tools\\idf-git\\2.44.0\\cmd;E:\\esp\\v4.4.8\\python_env\\idf4.4_py3.11_env\\Scripts",
+  "idf.espIdfPathWin": "E:/esp/v4.4.8/frameworks/esp-idf-v4.4.8/",
+  "idf.toolsPathWin": "E:\\esp\\v4.4.8",
+  "idf.pythonInstallPath": "E:\\esp\\v4.4.8\\python_env\\idf4.4_py3.11_env\\Scripts\\python.exe",
+  "idf.currentSetup": "E:\\esp\\v4.4.8\\frameworks\\esp-idf-v4.4.8",
+  "cmake.cmakePath": "E:/esp/v4.4.8/tools/cmake/3.23.1/bin/cmake.exe",
+  "cmake.configureOnOpen": false,
+  "cmake.autoConfigure": false
 }

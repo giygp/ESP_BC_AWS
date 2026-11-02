@@ -8,6 +8,7 @@
  */
 #include "common.h"
 #include "esp_spi_flash.h"
+#include "esp_partition.h"
 #include "nvs_flash.h"
 #include <string.h>
 #include "driver/gpio.h"
@@ -117,6 +118,61 @@ static void read_aliyun_config(void)
 	printf("id:%s,key:%s,secret:%s \n",device_info->aliyun.device_id,device_info->aliyun.product_key,device_info->aliyun.device_secret);
 }
 
+//一次性把三元组写入 flash「storage」分区偏移0处（配合 ALIYUN_BURN_WRITE 宏使用，烧完记得改回0）
+static esp_err_t write_aliyun_config(void)
+{
+	const esp_partition_t *partition;
+
+	partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "storage");
+	if (partition == NULL)
+	{
+		ESP_LOGE(TAG, "storage partition not found, write skip");
+		return ESP_ERR_NOT_FOUND;
+	}
+
+	//先读回整个4KB扇区，保留90字节三元组以外的数据，再改写三元组
+	uint8_t *sector = (uint8_t *)malloc(SPI_FLASH_SEC_SIZE);
+	if (sector == NULL)
+	{
+		ESP_LOGE(TAG, "storage write malloc failed");
+		return ESP_ERR_NO_MEM;
+	}
+
+	esp_err_t err = esp_partition_read(partition, 0, sector, SPI_FLASH_SEC_SIZE);
+	if (err != ESP_OK)
+	{
+		ESP_LOGE(TAG, "storage read back failed: %s", esp_err_to_name(err));
+		free(sector);
+		return err;
+	}
+
+	qs_settings_aliyun_t *cfg = (qs_settings_aliyun_t *)sector;
+	memset(cfg, 0, sizeof(qs_settings_aliyun_t));
+	strncpy(cfg->product_key,   PRODUCT_KEY,    sizeof(cfg->product_key) - 1);
+	strncpy(cfg->device_name,   DEVEICE_ID,     sizeof(cfg->device_name) - 1);	//id：KSPSBED00010008
+	strncpy(cfg->device_secret, DEVEICE_SECRET, sizeof(cfg->device_secret) - 1);
+
+	//flash写入前必须先擦除，只擦三元组所在的第一个4KB扇区
+	err = esp_partition_erase_range(partition, 0, SPI_FLASH_SEC_SIZE);
+	if (err != ESP_OK)
+	{
+		ESP_LOGE(TAG, "storage erase failed: %s", esp_err_to_name(err));
+		free(sector);
+		return err;
+	}
+
+	err = esp_partition_write(partition, 0, sector, SPI_FLASH_SEC_SIZE);
+	free(sector);
+	if (err != ESP_OK)
+	{
+		ESP_LOGE(TAG, "storage write failed: %s", esp_err_to_name(err));
+		return err;
+	}
+
+	ESP_LOGW(TAG, "aliyun triple written to storage: id=%s, key=%s", DEVEICE_ID, PRODUCT_KEY);
+	return ESP_OK;
+}
+
 //设置默认参数
 void param_config_init(void)
 {
@@ -156,6 +212,10 @@ void param_config_init(void)
 	device_info->snore->snore_state.block_size = 24;
 	//固件版本设置
 	memcpy(device_info->ota.running_version, INIT_VERSION, strlen(INIT_VERSION));
+
+#if ALIYUN_BURN_WRITE
+	write_aliyun_config();	//一次性烧录：三元组写入storage分区（用完把ALIYUN_BURN_WRITE改回0）
+#endif
 
 #if ALIYUN_BURN
 	read_aliyun_config();

@@ -28,6 +28,7 @@
 #include "aiot_mqtt_sign.h"
 #include "cJSON.h"
 #include "mqtt_client.h"
+#include "nvs.h"
 #include <errno.h>
 #include "freertos/semphr.h"
 #include "esp_flash.h"
@@ -47,6 +48,7 @@
 #define MAXIMUM_RETRY_WIFI (5)
 #define MAXIMUM_RETRY_SNTP (60)
 
+static const char *TAG = "wifi station";
 #define TUYA_MQTT_BROKER_PORT 1883
 /**
  * aiotMqttSign 最后一参：与 clientId 里 securemode 一致。
@@ -72,13 +74,60 @@ char mqtt_connect_aws_url[64] = {0};
 static char s_mqtt_uri[128];
 static uint8_t s_aws_mqtt_mode = 0;
 
-/* AWS IoT mutual-TLS certs (embedded via main/CMakeLists.txt EMBED_TXTFILES) */
-extern const uint8_t aws_root_ca_pem_start[] asm("_binary_AmazonRootCA1_pem_start");
-extern const uint8_t aws_root_ca_pem_end[]   asm("_binary_AmazonRootCA1_pem_end");
-extern const uint8_t aws_dev_cert_start[]    asm("_binary_KSPSBED00010007_cert_pem_start");
-extern const uint8_t aws_dev_cert_end[]      asm("_binary_KSPSBED00010007_cert_pem_end");
-extern const uint8_t aws_dev_key_start[]     asm("_binary_KSPSBED00010007_private_key_start");
-extern const uint8_t aws_dev_key_end[]       asm("_binary_KSPSBED00010007_private_key_end");
+/* AWS IoT mutual-TLS certs loaded from nvs_certs partition at runtime */
+#define AWS_CERTS_NVS_PARTITION  "nvs_certs"
+#define AWS_CERTS_NVS_NAMESPACE  "certs"
+static uint8_t s_aws_root_ca[2048];
+static uint8_t s_aws_dev_cert[2048];
+static uint8_t s_aws_dev_key[2048];
+static uint8_t s_aws_certs_loaded = 0;
+
+static esp_err_t load_aws_certs_from_nvs(void)
+{
+    if (s_aws_certs_loaded) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = nvs_flash_init_partition(AWS_CERTS_NVS_PARTITION);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NO_FREE_PAGES && err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGE(TAG, "nvs_flash_init_partition(%s): %s", AWS_CERTS_NVS_PARTITION, esp_err_to_name(err));
+        return err;
+    }
+
+    nvs_handle_t h;
+    err = nvs_open_from_partition(AWS_CERTS_NVS_PARTITION, AWS_CERTS_NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open_from_partition: %s (certs not provisioned?)", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t len, len_ca = 0, len_cert = 0, len_key = 0;
+    len = sizeof(s_aws_root_ca);
+    err = nvs_get_blob(h, "root_ca", s_aws_root_ca, &len);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "nvs_get_blob root_ca: %s", esp_err_to_name(err)); goto out; }
+    s_aws_root_ca[len] = '\0';
+    len_ca = len;
+
+    len = sizeof(s_aws_dev_cert);
+    err = nvs_get_blob(h, "dev_cert", s_aws_dev_cert, &len);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "nvs_get_blob dev_cert: %s", esp_err_to_name(err)); goto out; }
+    s_aws_dev_cert[len] = '\0';
+    len_cert = len;
+
+    len = sizeof(s_aws_dev_key);
+    err = nvs_get_blob(h, "dev_key", s_aws_dev_key, &len);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "nvs_get_blob dev_key: %s", esp_err_to_name(err)); goto out; }
+    s_aws_dev_key[len] = '\0';
+    len_key = len;
+
+    s_aws_certs_loaded = 1;
+    ESP_LOGI(TAG, "AWS certs loaded from NVS (root_ca=%d dev_cert=%d dev_key=%d bytes)",
+             (int)len_ca, (int)len_cert, (int)len_key);
+
+out:
+    nvs_close(h);
+    return err;
+}
 char mc_cli_data_subscribe_topic[64] = {0};
 char mc_cli_data_publish_topic[64] = {0};
 static const char s_mqtt_ca_cert[] =
@@ -110,7 +159,6 @@ static const char s_mqtt_ca_cert[] =
 extern char last_saved_ssid[32];
 extern char last_saved_passwd[64];
 
-static const char *TAG = "wifi station";
 
 /* 将传感器 CLI 回包转义为 JSON 字符串安全内容（\r\n → \n，" \ 转义） */
 static void json_escape_back(char *dst, size_t dst_size, const char *src)
@@ -177,7 +225,7 @@ wifi_config_t wifi_config = {
     },
 };
 
-/* 获 IP 后立即 SNTP（IP 直连，避免 DNS 延迟）；同步成功回调里启动 MQTT */
+/* 获 IP 后立即启动 SNTP（IP 直连，避免 DNS 延迟）；同步成功回调里启动 MQTT */
 static void on_sntp_synced(struct timeval *tv)
 {
     (void)tv;
@@ -325,7 +373,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "connected");
         set_wifi_status(WIFI_STATUS_CONNECTED);
         start_sntp_once();
-        /* 仅 HTTPS 下载 pause MQTT 时禁止 start；串口刷写阶段应允许重连 */
+/* 仅 HTTPS 下载 pause MQTT 时禁止 start；串口刷写阶段应允许重连 */
         if (client != NULL && !ota_mqtt_is_paused()) {
             esp_err_t merr = esp_mqtt_client_start(client);
             if (merr != ESP_OK && merr != ESP_ERR_INVALID_STATE) {
@@ -864,6 +912,12 @@ void aws_mqtt_server(void)
 {
     char clientid[64] = {0};
 
+    /* Load certificates from nvs_certs partition before configuring mTLS */
+    if (load_aws_certs_from_nvs() != ESP_OK) {
+        ESP_LOGE(TAG, "AWS certs not available, cannot start mTLS MQTT");
+        return;
+    }
+
     s_aws_mqtt_mode = 1;
     strncpy(mqtt_connect_aws_url, "airykrld1d7awu3.ats.iot.cn-north-1.amazonaws.com.cn",
             sizeof(mqtt_connect_aws_url) - 1);
@@ -881,9 +935,9 @@ void aws_mqtt_server(void)
         .uri = s_mqtt_uri,
         .client_id = clientid,
         /* AWS IoT uses mutual TLS, no username/password */
-        .cert_pem = (const char *)aws_root_ca_pem_start,
-        .client_cert_pem = (const char *)aws_dev_cert_start,
-        .client_key_pem = (const char *)aws_dev_key_start,
+        .cert_pem = (const char *)s_aws_root_ca,
+        .client_cert_pem = (const char *)s_aws_dev_cert,
+        .client_key_pem = (const char *)s_aws_dev_key,
         .buffer_size = 1024,
         .task_stack = 1024 * 20,
         .keepalive = 300,

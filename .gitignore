@@ -1,2 +1,13 @@
 # 本地工具、历史固件、烧录物料，不进入源码仓库
 ESP_BC_TOOLS/
+
+# 编译产物
+build/
+sdkconfig.old
+
+# device certs/private keys and NVS images - never commit
+components/use_wifi/certs/
+certs_bin/
+
+# 结项材料（Word 文档），不放源码仓库
+结项材料_DOC-MP-56028/

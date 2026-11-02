@@ -20,15 +20,18 @@
 /*-----------传感器类型------------------------*/
 #define BLE_TEST                                   0
 #define ALIYUN_BURN                                1
+/* ALIYUN_BURN_WRITE=1：下次开机把三元组（id/product_key/secret）写入 flash「storage」分区偏移0处。
+ * 用法：置1 → 编译烧录 → 开机一次（日志会打印写入结果）→ 改回0，避免每次开机都擦写 flash。 */
+#define ALIYUN_BURN_WRITE                          0
 /* ALIYUN_BURN=1：三元组来自 flash「storage」分区（产测烧录），与下方 PRODUCT_KEY 宏无关，易导致 MQTT「bad username or password」。
- * 迁移涂鸦/更正 ProductKey 期间改为 0，使用下方宏；量产烧录正确三元组到 storage 后再改回 1。 */
+ * 迁移涂鸦/更正 ProductKey 期间改为 0，使用下方宏；量or产烧录正确三元组到 stage 后再改回 1。 */
 
 #define DATA_UP                                     1
 #define OTA_ON_OFF                                  1
 
 #define MY_WIFI_SSID                                "keeson-office"//"keeson-office"//"DS" // xmhdesktop
 #define MY_WIFI_PASSWD                              "Smartbed2025@"//"ksn88888"//"ds654321"  // 87632154
-#define DEVEICE_ID                                  "KSPSBED00001057"
+#define DEVEICE_ID                                  "KSPSBED00010008"
 /* 涂鸦 IoT（阿里云版）ProductKey，与控制台 ProductID 一致 */
 #define PRODUCT_KEY                                 "ixvaCaIfGla"
 #define DEVEICE_SECRET                              "a1b790f9378c139682c11dbef51de948"
