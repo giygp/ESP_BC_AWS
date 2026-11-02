@@ -1,12 +1,13 @@
-# ESP_BC — 盛和养老智能床垫 ESP32 板端固件
+# ESP_BC — 盛和养老智能床垫 ESP32 板端固件（AWS IoT Core 版）
 
-ESP32 主控固件，用于盛和养老智能床垫 BC 模块：连接 SU2 睡眠传感器、MFP 床控主控盒，经 WiFi / 蓝牙与涂鸦 IoT（阿里云版）云端通信，实现实时数据上报、睡眠报告、OTA 升级、床控与打鼾干预等功能。
+ESP32 主控固件，用于盛和养老智能床垫 BC 模块：连接 SU2 睡眠传感器、MFP 床控主控盒，经 WiFi / 蓝牙与 **AWS IoT Core（中国区）** 云端通信，实现实时数据上报、睡眠报告、OTA 升级、床控与打鼾干预等功能。
 
-**当前版本：** `BC_ESP_2026_2_3_4`（V2.3.4）  
+> **平台迁移说明**：自 V2.4.0 起，MQTT 已从涂鸦 IoT（阿里云版）整体切换至 **AWS IoT Core**，设备通过 X.509 双向 TLS（mTLS）认证接入；OTA HTTPS 下载校验也改用内置 Amazon 根证书。历史涂鸦/阿里云代码仅作兼容保留。
+
+**当前版本：** `BC_ESP_2026_2_4_0`（V2.4.0）  
 **芯片：** ESP32  
-**工程名：** `bochang-program`
-
-详细变更说明见 [`固件/V2.3.4/BC_ESP_2026_2_3_4更新说明.md`](固件/V2.3.4/BC_ESP_2026_2_3_4更新说明.md)。
+**工程名：** `bochang-program`  
+**云端：** AWS IoT Core（`cn-north-1` 中国（北京）区）
 
 ---
 
@@ -16,11 +17,11 @@ ESP32 主控固件，用于盛和养老智能床垫 BC 模块：连接 SU2 睡�
 |------|------|
 | **WiFi** | STA 模式，支持断线重连；获 IP 后 SNTP 对时，再建立 MQTT |
 | **蓝牙 BLE** | 配网、数据透传、床控指令下发 |
-| **涂鸦 MQTT** | `mqtts://iot.smartbed.ink:1883`，动态 HMAC 签名，keepalive 300s |
-| **传感器 SU2** | UART1 与 SU2 模块通信，解析 5s / 60s / 睡眠报告 / 呼吸暂停等 protobuf 数据 |
+| **AWS MQTT** | `mqtts://<endpoint>:8883`，X.509 双向 TLS 认证（无用户名密码），keepalive 300s，连上即上报板端/传感器版本 |
+| **传感器 SU2** | UART1 与 SU2 模块通信，解析 5s / 60s / 睡眠报告 / 呼吸暂停等 protobuf 数据；支持云端传感器 OTA |
 | **MFP 床控** | UART2 与主控盒通信，支持 MQTT / BLE 床控、打鼾干预、闹钟联动 |
-| **OTA** | HTTPS 双分区升级，MQTT 下行 `/ota/device/upgrade`，上线 inform 版本 |
-| **数据上报** | 5s（type:1）、60s（type:2）、睡眠报告、打鼾参数等 JSON 经 MQTT / BLE 上报 |
+| **OTA** | HTTPS 双分区升级，内置 Amazon 根证书校验，MQTT 下行升级指令，上线 inform 版本、进度上报 |
+| **数据上报** | 5s（type:1）、60s（type:2）、睡眠报告、呼吸暂停、气袋、打鼾参数等 JSON 经 MQTT / BLE 上报 |
 
 ---
 
@@ -29,7 +30,7 @@ ESP32 主控固件，用于盛和养老智能床垫 BC 模块：连接 SU2 睡�
 | 项目 | 要求 |
 |------|------|
 | 芯片 | ESP32 |
-| 框架 | [ESP-IDF](https://docs.espressif.com/projects/esp-idf/)（建议 4.3 及以上，与现有 `sdkconfig` 匹配） |
+| 框架 | [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) v4.4.x（与现有 `sdkconfig` 匹配） |
 | 工具 | VS Code + Espressif IDF 插件，或 IDF 命令行 |
 | 操作系统 | Windows / Linux / macOS |
 
@@ -49,7 +50,47 @@ idf.py -p COMx flash monitor
 idf.py menuconfig
 ```
 
-分区表使用根目录 [`my_partitions.csv`](my_partitions.csv)（含 `ota_0` / `ota_1` 双应用分区、`storage` 8M FAT 等）。
+分区表使用根目录 [`my_partitions.csv`](my_partitions.csv)（含 `ota_0` / `ota_1` 双应用分区、`storage` 8M FAT、`nvs_certs` 32K 证书分区）。
+
+---
+
+## AWS IoT Core 接入说明（重点）
+
+设备通过 **X.509 证书双向 TLS** 接入 AWS IoT Core，不再使用三元组（ProductKey / DeviceName / DeviceSecret）密码认证。
+
+| 项目 | 值 |
+|------|------|
+| Endpoint | `airykrld1d7awu3.ats.iot.cn-north-1.amazonaws.com.cn` |
+| 端口 | `8883`（mqtts） |
+| Client ID | 设备 ID（如 `KSPSBED00010008`） |
+| 认证方式 | mTLS：Root CA + 设备证书 + 设备私钥，**无用户名密码** |
+
+### 证书存放与烧录
+
+证书**不编译进固件**，而是运行时从 flash 的 `nvs_certs` 分区（NVS 格式，32KB）读取，量产换设备只需烧录对应证书分区，固件无需重编。
+
+证书文件放在 `components/use_wifi/certs/`（已被 `.gitignore` 排除，**永不入库**）：
+
+```
+components/use_wifi/certs/
+├── AmazonRootCA1.pem              # AWS 根 CA
+├── <DeviceId>.cert.pem            # 设备证书（AWS IoT 控制台创建物证书后下载）
+└── <DeviceId>.private.key         # 设备私钥
+```
+
+使用根目录 [`make_certs_bin.ps1`](make_certs_bin.ps1) 一键打包并烧录（Windows PowerShell）：
+
+```powershell
+# 仅生成 nvs_certs_<DeviceId>.bin
+.\make_certs_bin.ps1 -DeviceId KSPSBED00010008
+
+# 生成并直接烧录到设备 nvs_certs 分区
+.\make_certs_bin.ps1 -DeviceId KSPSBED00010008 -Flash -Port COM3
+```
+
+脚本内部调用 ESP-IDF 的 `nvs_partition_gen.py` 生成 bin，再用 `parttool.py` 按分区名（`nvs_certs`）自动定位偏移烧录——分区表调整后无需改脚本。
+
+> ⚠️ 私钥仅存在于本地 certs 目录与设备 `nvs_certs` 分区，严禁提交到 Git 或随固件分发。
 
 ---
 
@@ -62,20 +103,18 @@ ESP_BC/
 ├── components/
 │   ├── common/                     # 全局配置、设备信息、NVS
 │   ├── app_control/                # 业务主控：SU2 解析、上报、床控、打鼾干预
-│   ├── use_wifi/                   # WiFi、SNTP、涂鸦 MQTT、OTA
+│   ├── use_wifi/                   # WiFi、SNTP、AWS MQTT、OTA、证书加载
+│   │   └── certs/                  # 设备证书（gitignore，本地放置）
 │   ├── use_ble_server/             # BLE GATT 服务
 │   ├── use_uart/                   # UART 驱动封装
 │   ├── use_mfp/                    # MFP 床控协议
 │   ├── use_adc/                    # ADC / CH423（按需）
 │   ├── use_pwm/                    # PWM（按需）
 │   └── protobuf/                   # SU2 protobuf 编解码
-├── my_partitions.csv               # 自定义分区表
+├── make_certs_bin.ps1              # AWS 证书打包/烧录脚本
+├── my_partitions.csv               # 自定义分区表（含 nvs_certs）
 ├── sdkconfig / sdkconfig.defaults
-├── 固件/                           # 各版本发布 bin 与更新说明
-│   └── V2.3.4/                     # 当前版本烧录包
-├── flash_download_tool/            # Windows 烧录工具配置
-├── id/                             # 设备 ID / 三元组生成工具
-└── docs/                           # 架构与设计文档
+└── docs/                           # 架构与协议文档
 ```
 
 ---
@@ -98,40 +137,41 @@ ESP_BC/
 
 | 宏 | 说明 |
 |----|------|
-| `INIT_VERSION` | 固件版本字符串，OTA inform 与 NVS 使用 |
-| `ALIYUN_BURN` | `1`：三元组从 flash `storage` 分区读取（量产）；`0`：使用下方 `PRODUCT_KEY` / `DEVEICE_ID` / `DEVEICE_SECRET` 宏（开发调试） |
-| `PRODUCT_KEY` | 涂鸦 ProductKey，当前为 `ixvaCaIfGla` |
+| `INIT_VERSION` | 固件版本字符串（当前 `BC_ESP_2026_2_4_0`），OTA inform 与 NVS 使用 |
+| `DEVEICE_ID` | 默认设备 ID（如 `KSPSBED00010008`），AWS MQTT Client ID 与上报 JSON 中的 `id` 使用 |
 | `OTA_ON_OFF` | OTA 功能开关 |
 | `DATA_UP` | 数据上报总开关 |
-
-> 量产设备三元组通过 `storage` 分区烧录，与 `common.h` 中宏无关；开发阶段若 MQTT 报 `bad username or password`，可临时将 `ALIYUN_BURN` 设为 `0` 并使用正确三元组宏。
+| `ALIYUN_BURN` | 历史涂鸦/阿里云三元组开关（AWS 模式下不使用，仅兼容保留） |
 
 默认 WiFi SSID / 密码也在 `common.h` 中，量产前请改为现场网络或通过 BLE 配网写入 NVS。
 
 ---
 
-## 云端 MQTT Topic
+## 云端 MQTT Topic（AWS 模式）
 
-连接成功后设备会订阅 / 发布以下 Topic（`{productKey}`、`{deviceId}` 来自三元组）：
+AWS 模式下 Topic 以设备 ID 为前缀（无 ProductKey），连接成功后订阅 / 发布：
 
 | 方向 | Topic | 说明 |
 |------|-------|------|
-| 发布 | `/{productKey}/{deviceId}/user/5s/put` | 5s 实时数据 |
-| 发布 | `/{productKey}/{deviceId}/user/60s/put` | 60s 统计数据 |
-| 发布 | `/{productKey}/{deviceId}/user/sleep/put` | 睡眠报告 |
-| 发布 | `/{productKey}/{deviceId}/user/sa/put` | 呼吸暂停数据 |
-| 订阅 | `/{productKey}/{deviceId}/user/cli/get` | CLI 指令（sensorCli / deviceCli / mcCli） |
-| 发布 | `/{productKey}/{deviceId}/user/cli/put` | CLI 应答 |
-| 订阅 | `/ota/device/upgrade/{productKey}/{deviceId}` | OTA 升级下行 |
-| 发布 | `/ota/device/inform/{productKey}/{deviceId}` | OTA 版本 inform（每次连上 MQTT 上报） |
+| 发布 | `{deviceId}/user/5s/put` | 5s 实时数据 |
+| 发布 | `{deviceId}/user/60s/put` | 60s 统计数据 |
+| 发布 | `{deviceId}/user/sleep/put` | 睡眠报告 |
+| 发布 | `{deviceId}/user/sa/put` | 呼吸暂停数据 |
+| 发布 | `{deviceId}/user/airbag/put` | 气袋数据 |
+| 订阅 | `{deviceId}/user/cli/get` | CLI 指令（sensorCli / deviceCli / mcCli） |
+| 发布 | `{deviceId}/user/cli/put` | CLI 应答 |
+| 发布 | `{deviceId}/user/mccli/put` | MFP 床控应答 |
+| 订阅 | `{deviceId}/ota/upgrade/get` | OTA 升级下行 |
+| 发布 | `{deviceId}/ota/inform/put` | OTA 版本 inform（每次连上 MQTT 上报，含板端/传感器版本） |
+| 发布 | `{deviceId}/ota/progress/put` | OTA 进度上报 |
 
-### 5s / 60s 数据格式（V2.3.4+）
+### 5s / 60s 数据格式
 
 `ts` 为 ESP 上报时刻，`sensor_ts` 为传感器侧采样时间戳：
 
 ```json
 {
-  "id": "KSPSBED00001057",
+  "id": "KSPSBED00010008",
   "ts": 1710000000,
   "type": 1,
   "data": {
@@ -148,30 +188,23 @@ ESP_BC/
 ```json
 {
   "params": {
-    "version": "BC_ESP_2026_2_3_4",
+    "version": "BC_ESP_2026_2_4_0",
     "url": "https://example.com/firmware.bin"
   }
 }
 ```
 
-`data` 与 `params` 字段均可，需包含 `version`、`url`。
+`data` 与 `params` 字段均可，需包含 `version`、`url`；HTTPS 下载使用内置 Amazon 根证书校验服务器。
 
 ---
 
-## 烧录发布包
+## 烧录清单
 
-当前版本预编译固件位于 [`固件/V2.3.4/`](固件/V2.3.4/)：
+一台全新设备完整烧录顺序（以 `idf.py` / `esptool` 为例）：
 
-| 文件 | 说明 |
-|------|------|
-| `bochang-program.bin` | 应用程序 |
-| `bootloader.bin` | Bootloader |
-| `partition-table.bin` | 分区表 |
-| `ota_data_initial.bin` | OTA 数据初始区 |
-
-可使用 [`flash_download_tool/`](flash_download_tool/) 或 `idf.py flash` 烧录。历史版本见 [`固件/`](固件/) 下各版本目录。
-
-设备 ID / 阿里云三元组可使用 [`id/ID_Generator_Tool/`](id/ID_Generator_Tool/) 生成并写入 `storage` 分区。
+1. **固件四件套**：`bootloader.bin`、`partition-table.bin`（`my_partitions.csv` 生成）、`bochang-program.bin`、`ota_data_initial.bin`
+2. **AWS 证书分区**：`.\make_certs_bin.ps1 -DeviceId <设备ID> -Flash`（写入 `nvs_certs`）
+3. 如需产测三元组（历史涂鸦兼容），另行写入 `storage` 分区
 
 ---
 
@@ -179,22 +212,22 @@ ESP_BC/
 
 | 文档 | 说明 |
 |------|------|
-| [`固件/V2.3.4/BC_ESP_2026_2_3_4更新说明.md`](固件/V2.3.4/BC_ESP_2026_2_3_4更新说明.md) | V2.3.4 完整更新说明 |
-| [`固件/盛和养老固件更新说明.md`](固件/盛和养老固件更新说明.md) | 历史版本变更记录 |
-| [`盛和养老系统下发协议V2.5.docx`](盛和养老系统下发协议V2.5.docx) | 云端 / APP 下发协议 |
-| [`docs/SU2_通信架构.md`](docs/SU2_通信架构.md) | SU2 通信架构设计（新工程参考） |
+| [`docs/SU2_通信架构.md`](docs/SU2_通信架构.md) | SU2 通信架构设计 |
+| [`docs/盛和养老系统下发协议V2.5.docx`](docs/盛和养老系统下发协议V2.5.docx) | 云端 / APP 下发协议 |
+| [`docs/智能床通信协议20250416.docx`](docs/智能床通信协议20250416.docx) | 智能床通信协议 |
 
 ---
 
-## Git 分支
+## 近期版本演进
 
-| 分支 | 说明 |
+| 版本 | 说明 |
 |------|------|
-| `project` | 当前主开发 / 发布分支（含 V2.3.4） |
-| `main` | 合并主线 |
+| V2.4.0 | **MQTT 从涂鸦（阿里云）切换到 AWS IoT Core**（mTLS 证书认证）；OTA HTTPS 校验改用内置证书束；MQTT 连上即上报板端/传感器版本；证书改为 `nvs_certs` 分区运行时加载；新增证书打包烧录脚本 |
+| V2.3.5 | 云端传感器 OTA；删除 BLE SU2 升级 |
+| V2.3.4 | 涂鸦 log 打印兼容（迁移前末版） |
 
 ---
 
 ## 许可证
 
-内部项目，版权归 KEESON / 盛和相关团队所有。未经授权请勿对外分发固件与三元组。
+内部项目，版权归 KEESON / 盛和相关团队所有。未经授权请勿对外分发固件、设备证书与私钥。
