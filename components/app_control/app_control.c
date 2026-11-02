@@ -31,6 +31,7 @@
 #include "driver/gpio.h"
 #include "use_mfp.h"
 #include "use_ota.h"
+#include "esp_heap_caps.h"
 
 // ==================== 调试配置开关 ====================
 // 量产时将下面的宏改为 0，调试时改为 1
@@ -550,69 +551,30 @@ uint16_t crc16_compute(uint8_t const *p_data, uint32_t size)
 void report_to_aliyun(uint8_t type, uint8_t *value, uint16_t len)
 {
     if (!value || len == 0) return;
+    /* 断线后还组 200 个 cJSON 小对象，会把内部 RAM 拆碎，TLS 重连拿不到 16KB 连续缓冲。 */
+    if (!get_mqtt_status()) {
+        printf("report skip type=%u len=%u mqtt down\n", (unsigned)type, (unsigned)len);
+        return;
+    }
     uint16_t one_packet_len = 200;   //256;  //128;    //64;   //修改
     uint16_t packet_num = len / one_packet_len;
     uint16_t i,j;
     cJSON *firstItem = NULL, *secondItem = NULL, *thirdItem = NULL;
     char *p_str = NULL;
-    char *json_buff = malloc(1200);     //1024  //修改
+    uint16_t this_len;
     if((len % one_packet_len) != 0)
         packet_num ++;
-    printf("%d packet to report_to_aliyun\n", packet_num);
+    printf("%u packet to report_to_aliyun type=%u len=%u\n", (unsigned)packet_num, (unsigned)type, (unsigned)len);
     for(i = 0; i < packet_num; i++)
     {
-        printf("i = %d\n",i);
-        if((i == (packet_num - 1)) && ((len % one_packet_len) != 0))
-        {
-            printf("ii = %d\n",i);
-            firstItem = cJSON_CreateObject();
-            cJSON_AddItemToObject(firstItem,"id",cJSON_CreateString(device_info->id));
-            cJSON_AddItemToObject(firstItem,"ts",cJSON_CreateNumber(device_info->utc.time_stamp));
-            cJSON_AddItemToObject(firstItem,"type",cJSON_CreateNumber(type));
-            cJSON_AddItemToObject(firstItem,"report",cJSON_CreateString(json_report_name));
-
-            secondItem = cJSON_CreateObject();
-            cJSON_AddItemToObject(secondItem,"len",cJSON_CreateNumber(len));
-            cJSON_AddItemToObject(secondItem,"allPacket", cJSON_CreateNumber(packet_num));
-            cJSON_AddItemToObject(secondItem,"packet", cJSON_CreateNumber(i));
-            cJSON_AddItemToObject(secondItem,"packetLen",cJSON_CreateNumber(len % one_packet_len));
-            
-            thirdItem = cJSON_CreateArray();
-            
-            for(j = 0; j < len % one_packet_len; j ++)
-            {
-                cJSON_AddItemToArray(thirdItem, cJSON_CreateNumber(value[i*one_packet_len + j]));
-            }
-            cJSON_AddItemToObject(secondItem,"value",thirdItem);
-            cJSON_AddItemToObject(firstItem,"data",secondItem);
-            p_str = cJSON_Print(firstItem);
-            if(p_str)
-            {
-                cJSON_Minify(p_str);
-                printf("%s\n", p_str); //打印创建的字符串
-                if(get_mqtt_status())
-                {   
-                    
-                    if(mqtt_send_mutex == true)
-                    {
-                        mqtt_send_mutex = false;
-                        esp_mqtt_client_publish(client, user_sleep_data_publish_topic, (char *)p_str, strlen((char *)p_str), 0, 0);
-                        mqtt_send_mutex = true;                        
-                    }
-                    else
-                    {
-                        printf("mqtt_send_mutex1\n");
-                    }
-                }
-                free(p_str);                      //一定要记得释放,不然会导致内存泄漏
-                p_str = NULL;
-            }
-            else printf("p_str fail\n");
-            cJSON_Delete(firstItem); 
-            continue;
+        if (!get_mqtt_status()) {
+            printf("report abort type=%u packet=%u mqtt down\n", (unsigned)type, (unsigned)i);
+            break;
         }
-        
-        printf("i = %d\n",i);
+        this_len = one_packet_len;
+        if ((i == (packet_num - 1)) && ((len % one_packet_len) != 0)) {
+            this_len = (uint16_t)(len % one_packet_len);
+        }
         firstItem = cJSON_CreateObject();
         cJSON_AddItemToObject(firstItem,"id",cJSON_CreateString(device_info->id));
         cJSON_AddItemToObject(firstItem,"ts",cJSON_CreateNumber(device_info->utc.time_stamp));
@@ -623,37 +585,41 @@ void report_to_aliyun(uint8_t type, uint8_t *value, uint16_t len)
         cJSON_AddItemToObject(secondItem,"len",cJSON_CreateNumber(len));
         cJSON_AddItemToObject(secondItem,"allPacket", cJSON_CreateNumber(packet_num));
         cJSON_AddItemToObject(secondItem,"packet", cJSON_CreateNumber(i));
-        cJSON_AddItemToObject(secondItem,"packetLen",cJSON_CreateNumber(one_packet_len));
-        
+        cJSON_AddItemToObject(secondItem,"packetLen",cJSON_CreateNumber(this_len));
+
         thirdItem = cJSON_CreateArray();
-        
-        for(j = 0; j < one_packet_len; j ++)
+        for(j = 0; j < this_len; j ++)
         {
             cJSON_AddItemToArray(thirdItem, cJSON_CreateNumber(value[i*one_packet_len + j]));
         }
-
         cJSON_AddItemToObject(secondItem,"value",thirdItem);
         cJSON_AddItemToObject(firstItem,"data",secondItem);
-        memset(json_buff, 0, 1200);     //1024
-        cJSON_PrintPreallocated(firstItem, json_buff, 1200, 1);   //1024
-        printf("%s\n", json_buff); //打印创建的字符串
+        /* 压缩 JSON，不再 pretty-print 整包。整包 printf 会长时间占住 CPU，MQTT 任务抢不到，TLS 重连超时。 */
+        p_str = cJSON_Print(firstItem);
+        cJSON_Delete(firstItem);
+        if (p_str == NULL) {
+            printf("report json fail type=%u packet=%u\n", (unsigned)type, (unsigned)i);
+            continue;
+        }
+        cJSON_Minify(p_str);
+        printf("report put type=%u packet=%u/%u bytes=%u\n",
+               (unsigned)type, (unsigned)i, (unsigned)packet_num, (unsigned)strlen(p_str));
         if(get_mqtt_status())
-        {   
+        {
             if(mqtt_send_mutex == true)
             {
                 mqtt_send_mutex = false;
-                esp_mqtt_client_publish(client, user_sleep_data_publish_topic, (char *)json_buff, strlen((char *)json_buff), 0, 0);
-                mqtt_send_mutex = true;                        
+                esp_mqtt_client_publish(client, user_sleep_data_publish_topic, (char *)p_str, strlen((char *)p_str), 0, 0);
+                mqtt_send_mutex = true;
             }
             else
             {
                 printf("mqtt_send_mutex2\n");
             }
         }
-        
-        cJSON_Delete(firstItem); 
+        free(p_str);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-    free(json_buff);
 }
 void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
 {
@@ -685,7 +651,7 @@ void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
         {
             if(strstr(m_cli_command_de->command, "list updata") != NULL){
                 printf("get list updata cil\n");
-                //set_mode_flag_config(0);
+                set_mode_flag_config(0);
                 // set_bc(device_info->utc.time_stamp, m_cli_command_de->command, 1, 0, device_info->id, 200);
             }
            /*
@@ -996,15 +962,37 @@ void muilt_cmd_parse(uint8_t *value, size_t len)
 
 }
 
+/* 大于 1KB 的缓冲优先放 PSRAM。任务栈不能放 PSRAM，内部 RAM 不够连续 10KB 时报告任务会创建失败。 */
+static void *alloc_pref_spiram(size_t size)
+{
+    void *p = heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p == NULL) {
+        p = heap_caps_calloc(1, size, MALLOC_CAP_8BIT);
+    }
+    return p;
+}
+
 char *report_muilt_cmd_parse(uint8_t *value, size_t len)
 {
     uint8_t cmd_num = 0;
-    uint8_t sing_cmd_value2[256] = {0};     //缩减 2048
-    uint8_t temp[2304] = {0};               //缩减 4096
+    uint8_t *sing_cmd_value2 = NULL;
+    uint8_t *temp = NULL;
     uint32_t report_len = 0;
     char *report = (char*)malloc(sizeof(char) * 1024);
+    qs_pb_msg_state_raw_data *m_state_pb_msg_de = NULL;
 
-    qs_pb_msg_state_raw_data *m_state_pb_msg_de = (qs_pb_msg_state_raw_data *)malloc(sizeof(qs_pb_msg_state_raw_data));
+    /* 原来在栈上：256 + 2304 字节。list 多帧解析会和 set_bc、报告扫描叠在同一条任务栈上。 */
+    sing_cmd_value2 = (uint8_t *)alloc_pref_spiram(256);
+    temp = (uint8_t *)alloc_pref_spiram(2304);
+    m_state_pb_msg_de = (qs_pb_msg_state_raw_data *)alloc_pref_spiram(sizeof(qs_pb_msg_state_raw_data));
+    if (report == NULL || sing_cmd_value2 == NULL || temp == NULL || m_state_pb_msg_de == NULL) {
+        printf("report_muilt_cmd_parse alloc fail\n");
+        free(report);
+        free(sing_cmd_value2);
+        free(temp);
+        free(m_state_pb_msg_de);
+        return NULL;
+    }
 
     for(uint16_t i=0;i<len;i++)   //分帧
     {
@@ -1039,6 +1027,8 @@ char *report_muilt_cmd_parse(uint8_t *value, size_t len)
         }
     }
     free(m_state_pb_msg_de);
+    free(sing_cmd_value2);
+    free(temp);
     return report;
 }
 void uart_data_parser_task(void *pv)
@@ -1212,25 +1202,32 @@ int set_bc(uint32_t time_stamp, char *value, uint8_t switch_return, uint8_t swit
         return 0;
     }
 
-    // printf("cmd:%s\n",value);
-    char pb[240] = {0};
-    char cmd[512] = {0};
-	uint16_t pb_len = sizeof(pb);
-	qs_pb_msg_state_raw_data m_pb_msg_en;    //这里理论上要用qs_pb_msg_cli_command，因此导致pb_len需要减去2(结构体多了uint32，4字节，压缩后还多2字节)
-    qs_pb_msg_state_raw_data *m_pb_msg_de = (qs_pb_msg_state_raw_data *)malloc(sizeof(qs_pb_msg_state_raw_data));
-    memset(m_pb_msg_de, 0, sizeof(qs_pb_msg_state_raw_data));
+    /* pb/cmd/编码结构体原来在栈上约 2.8KB。改到 PSRAM，避免报告任务和 MQTT 任务把内部 RAM 栈撑满。 */
+    char *pb = (char *)alloc_pref_spiram(240);
+    char *cmd = (char *)alloc_pref_spiram(512);
+	uint16_t pb_len = 240;
+	qs_pb_msg_state_raw_data *m_pb_msg_en = (qs_pb_msg_state_raw_data *)alloc_pref_spiram(sizeof(qs_pb_msg_state_raw_data));
+    qs_pb_msg_state_raw_data *m_pb_msg_de = (qs_pb_msg_state_raw_data *)alloc_pref_spiram(sizeof(qs_pb_msg_state_raw_data));
+    if (pb == NULL || cmd == NULL || m_pb_msg_en == NULL || m_pb_msg_de == NULL) {
+        printf("set_bc alloc fail\n");
+        free(pb);
+        free(cmd);
+        free(m_pb_msg_en);
+        free(m_pb_msg_de);
+        return 0;
+    }
 
 	// char device_id[] = {"SU20001112"};   //xiugai
-	strcpy(m_pb_msg_en.device_id, device_id);
-	m_pb_msg_en.timestamp = time_stamp;
-	m_pb_msg_en.data_len = strlen(value);
-	m_pb_msg_en.data[0] = strlen(value);
-	m_pb_msg_en.data[1] = 0x00;
-	m_pb_msg_en.data[2] = 0x00;
-	m_pb_msg_en.data[3] = 0x00;
+	strcpy(m_pb_msg_en->device_id, device_id);
+	m_pb_msg_en->timestamp = time_stamp;
+	m_pb_msg_en->data_len = strlen(value);
+	m_pb_msg_en->data[0] = strlen(value);
+	m_pb_msg_en->data[1] = 0x00;
+	m_pb_msg_en->data[2] = 0x00;
+	m_pb_msg_en->data[3] = 0x00;
 
-    memcpy(m_pb_msg_en.data + 4, value, strlen(value));
-    qs_pb_state_raw_data_encode(&m_pb_msg_en, &pb[0], (size_t *)&pb_len);
+    memcpy(m_pb_msg_en->data + 4, value, strlen(value));
+    qs_pb_state_raw_data_encode(m_pb_msg_en, pb, (size_t *)&pb_len);
     // for (uint8_t i = 0; i < pb_len; i++)
 	// {
 	// 	printf("%x ", pb[i]);
@@ -1299,6 +1296,9 @@ int set_bc(uint32_t time_stamp, char *value, uint8_t switch_return, uint8_t swit
         pause_uart_task = true;
     }
     free(m_pb_msg_de);
+    free(m_pb_msg_en);
+    free(pb);
+    free(cmd);
     return 0;
 }
 
@@ -1682,26 +1682,64 @@ uint32_t find_report_time(char *report_name, uint8_t len)
     return report_tim;
 }
 
+/* 只去掉行尾的 \r、\n，保留报告名正文。
+ * 传感器 list 目前只回 \n。固定减 2 会把 "004" 砍成 "00"，
+ * find_report_time() 从末尾倒数时月份落到 '-' 上，整行时间变成 0。 */
+static void copy_report_line(char *dst, size_t dst_size, const char *src, uint16_t raw_len)
+{
+    if (dst == NULL || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (src == NULL || raw_len == 0) {
+        return;
+    }
+    while (raw_len > 0 && (src[raw_len - 1] == '\n' || src[raw_len - 1] == '\r')) {
+        raw_len--;
+    }
+    if (raw_len >= dst_size) {
+        raw_len = (uint16_t)(dst_size - 1);
+    }
+    memcpy(dst, src, raw_len);
+    dst[raw_len] = '\0';
+}
+
+/* 报告扫描的大缓冲。放 PSRAM，避免在 report_data_up 的内部 RAM 栈上占 2.6KB。 */
+typedef struct {
+    char return_value[1024];
+    char json_buff[512];
+    char report_name[30][30];
+} report_scan_mem_t;
+
 void check_report_and_up_to_aliyun(void)
 {
     //uint64_t start_time = esp_timer_get_time(); 
-    char return_value[1024] = {0};
-    char json_buff[512] = {0};
+    report_scan_mem_t *scan = (report_scan_mem_t *)alloc_pref_spiram(sizeof(report_scan_mem_t));
+    char *return_value;
+    char *json_buff;
+    char (*report_name)[30];
     uint16_t offset = 0;
     char temp[3] = {0};
     char get_report_cmd1[] = "list";
     char get_report_cmd2[] = "report 0";
     uint8_t report_num = 0;
-    char report_name[30][30] = {0};  //报告列表
     uint32_t report_time[30] = {0};   //报告对应的时间
     uint8_t report_len[30] = {0};   //报告名长度
     uint32_t current_time;
     nvs_handle nvs_config_handler;
 
+    if (scan == NULL) {
+        printf("check_report alloc fail\n");
+        return;
+    }
+    return_value = scan->return_value;
+    json_buff = scan->json_buff;
+    report_name = scan->report_name;
+
     memset(return_value, 0, 1024);
     printf("get_report_cmd1\n");
     set_bc(device_info->utc.time_stamp, get_report_cmd1, 1, 1, return_value, 1000);
-    // printf("\n \n \n cil = list :return_value =\n%s\nstrlen(return_value) = %d\n", return_value, strlen(return_value));
+    printf("\n \n \n cil = list :return_value =\n%s\nstrlen(return_value) = %d\n", return_value, strlen(return_value));
 
     if(strstr(return_value,"NONE"))
     {
@@ -1735,14 +1773,13 @@ void check_report_and_up_to_aliyun(void)
 
         printf("report has %d total\n", report_num);
 
-        //分割报告名
+        //分割报告名。report_len 含行尾 \n 或 \r\n，拷贝时只去掉换行，不减固定 2 字节
         for(uint16_t i=0; i<report_num; i++)
         {
-            memcpy(report_name[i], return_value + offset, report_len[i] - 2);
+            copy_report_line(report_name[i], sizeof(report_name[i]), return_value + offset, report_len[i]);
             offset += report_len[i] ;
-            //printf("report_name[%d] = %s\n", i, report_name[i]);
-            report_time[i] = find_report_time(report_name[i], strlen(report_name[i]));
-            //printf("report_time[%d] = %d\n",i, report_time[i]);
+            report_time[i] = find_report_time(report_name[i], (uint8_t)strlen(report_name[i]));
+            printf("report_time[%d] = %u name=%s\n", i, report_time[i], report_name[i]);
         }
         
         printf("current report = %s\n",device_info->report);
@@ -1875,6 +1912,7 @@ void check_report_and_up_to_aliyun(void)
     }
     //int64_t end_time = esp_timer_get_time();
     //printf("check_report_and_up_to_aliyun time = %lld ms\n", (end_time - start_time)/1000);
+    free(scan);
 }
 
 //utc 获取任务
@@ -2141,10 +2179,17 @@ void report_data_up_task(void *pv)
     //vTaskDelay(30*1000 / portTICK_PERIOD_MS);
     //while(1)
     {
+        /* 进到这里才会打印 get_report_cmd1。条件不满足时直接说明原因，避免看起来像没触发 */
+        printf("report_data_up_task enter wifi=%d mqtt=%d ota=%d sensorOta=%d\n",
+               get_wifi_status(), get_mqtt_status(), ota_now_flag, sensor_upgrade_flag);
         if(get_wifi_status() && get_mqtt_status() && ota_now_flag == 0 && sensor_upgrade_flag == 0)
         {
 
             check_report_and_up_to_aliyun();
+        }
+        else
+        {
+            printf("report_data_up_task skip, no get_report_cmd1\n");
         }
 
     }
@@ -2225,27 +2270,38 @@ void Task_scheduling(void *pv)
         {
             vTaskDelay(1000 / portTICK_PERIOD_MS);
         }
-    //实时数据上报
+    //实时数据上报与报告上报可能落在同一次循环。先创建报告任务，避免 6KB 实时任务先拿走内部 RAM 里最后一块连续空间。
+    uint8_t create_real = 0;
     if(s_1s_Cnt>4)
     {
-        xTaskCreatePinnedToCore(real_data_up_task, "real_data_up", 1024*6, NULL, 4, &real_data_up_task_handle, 1);   
         s_1s_Cnt=0;
         s_5s_Cnt++;
+        create_real = 1;
     }
     
-    //报告数据上报
+    //报告数据上报。栈上的大数组已改到 PSRAM，这里 4KB 内部栈即可。
     if(get_mode_flag_config() == 0 || s_5s_Cnt>119)
     {
         if(device_info->utc.flag == true && get_5s_flag == true)
         {
+            BaseType_t report_task_ok;
             set_mode_flag_config(2);
             s_5s_Cnt=0;
-            xTaskCreatePinnedToCore(report_data_up_task, "report_data_up", 1024*10, NULL, 10, &report_data_up_task_handle, 1);//缩减2048*7
-            
+            report_task_ok = xTaskCreatePinnedToCore(report_data_up_task, "report_data_up", 1024*4, NULL, 10, &report_data_up_task_handle, 1);
+            printf("report_data_up create %s heap=%u internal=%u largest=%u\n",
+                   (report_task_ok == pdPASS) ? "ok" : "fail",
+                   (unsigned)esp_get_free_heap_size(),
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         }else{
             s_5s_Cnt = 115; // 延迟30s
+            printf("report_data_up wait utc=%d get_5s=%d\n", device_info->utc.flag, get_5s_flag);
         }
  
+    }
+    if(create_real)
+    {
+        xTaskCreatePinnedToCore(real_data_up_task, "real_data_up", 1024*6, NULL, 4, &real_data_up_task_handle, 1);
     }
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     s_1s_Cnt++;

@@ -855,6 +855,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT_EVENT_ERROR");
         break;
+    case MQTT_EVENT_BEFORE_CONNECT:
+        /* 开始重连。后面若出现 esp-tls timeout，才是握手没在时限内完成。 */
+        break;
     default:
         printf("Other event id:%d \n", event->event_id);
         break;
@@ -938,9 +941,14 @@ void aws_mqtt_server(void)
         .cert_pem = (const char *)s_aws_root_ca,
         .client_cert_pem = (const char *)s_aws_dev_cert,
         .client_key_pem = (const char *)s_aws_dev_key,
-        .buffer_size = 1024,
+        /* 一包睡眠数据压缩后仍可能超过 1KB。缓冲加大后整包一次写出。 */
+        .buffer_size = 4096,
         .task_stack = 1024 * 20,
+        /* 高于串口解析任务(5)，避免补发 printf/组包把 TLS 握手饿死 */
+        .task_prio = 12,
         .keepalive = 300,
+        /* 默认 10s。蓝牙共存只能开 MIN_MODEM，AWS 握手经常超过 10s */
+        .network_timeout_ms = 30000,
     };
 
     client = esp_mqtt_client_init(&mqtt_cfg);
