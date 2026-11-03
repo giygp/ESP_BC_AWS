@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     一键打包 AWS 设备证书为 NVS bin 文件
 .EXAMPLE
@@ -14,16 +14,55 @@ param(
 
     [switch]$Flash,
 
-    [string]$Port = "COM3"
+    [string]$Port = "COM3",
+
+    # 换电脑时一般不用改脚本：优先读环境变量，或用参数覆盖
+    [string]$IdfPath   = "",
+    [string]$IdfPython = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-# ==== 路径配置（按你本机实际情况改这里）====
-$IDF_PATH       = "E:\esp\v4.4.8\frameworks\esp-idf-v4.4.8"
-$IDF_PYTHON     = "E:\esp\v4.4.8\python_env\idf4.4_py3.11_env\Scripts\python.exe"
-$NVS_TOOL       = Join-Path $IDF_PATH "components\nvs_flash\nvs_partition_generator\nvs_partition_gen.py"
-$PARTTOOL       = Join-Path $IDF_PATH "components\partition_table\parttool.py"
+# ==== ESP-IDF 路径（自动获取，优先级：命令行参数 > 环境变量 > 本机默认值）====
+$FallbackIdf    = "E:\esp\v4.4.8\frameworks\esp-idf-v4.4.8"
+$FallbackPython = "E:\esp\v4.4.8\python_env\idf4.4_py3.11_env\Scripts\python.exe"
+
+if (-not $IdfPath) {
+    $IdfPath = if ($env:IDF_PATH) { $env:IDF_PATH } else { $FallbackIdf }
+}
+
+if (-not $IdfPython) {
+    if ($env:IDF_PYTHON_ENV_PATH -and (Test-Path (Join-Path $env:IDF_PYTHON_ENV_PATH "Scripts\python.exe"))) {
+        # 在 "ESP-IDF PowerShell" 或执行 export.bat 后会自动设置该变量
+        $IdfPython = Join-Path $env:IDF_PYTHON_ENV_PATH "Scripts\python.exe"
+    } elseif (Test-Path $FallbackPython) {
+        $IdfPython = $FallbackPython
+    } else {
+        # 按 Windows 安装器目录结构，在 IDF 根目录的上级搜索 python_env 虚拟环境
+        $envRoots = @((Split-Path $IdfPath -Parent), (Split-Path (Split-Path $IdfPath -Parent) -Parent)) | Select-Object -Unique
+        foreach ($root in $envRoots) {
+            $py = Get-ChildItem -Path (Join-Path $root "python_env") -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -like "*\Scripts" } | Select-Object -First 1
+            if ($py) { $IdfPython = $py.FullName; break }
+        }
+    }
+}
+
+$NVS_TOOL   = Join-Path $IdfPath "components\nvs_flash\nvs_partition_generator\nvs_partition_gen.py"
+$PARTTOOL   = Join-Path $IdfPath "components\partition_table\parttool.py"
+
+# ==== 校验工具链路径，换电脑时给出明确提示 ====
+if (-not (Test-Path $IdfPath)) {
+    Write-Host "[ERROR] 找不到 ESP-IDF: $IdfPath" -ForegroundColor Red
+    Write-Host "解决办法（任选其一）:" -ForegroundColor Yellow
+    Write-Host "  1) 安装 ESP-IDF v4.4.x 后，从 'ESP-IDF PowerShell' 中运行本脚本（推荐）"
+    Write-Host "  2) .\make_certs_bin.ps1 -DeviceId xxx -IdfPath <esp-idf目录> -IdfPython <IDF的python.exe>"
+    exit 1
+}
+if (-not $IdfPython -or -not (Test-Path $IdfPython)) {
+    Write-Host "[ERROR] 找不到 ESP-IDF 的 Python: $IdfPython" -ForegroundColor Red
+    Write-Host "请用    hon.exe，或在 ESP-IDF PowerShell 中运行" -ForegroundColor Yellow
+    exit 1
+}
 
 # ==== 分区配置（必须与 my_partitions.csv 中 nvs_certs 一行保持一致！）====
 # 烧录偏移不再硬编码：parttool.py 会从设备上的分区表里按分区名自动查出 nvs_certs 的偏移
@@ -70,7 +109,7 @@ Write-Host "[OK] CSV 已生成: $CsvFile" -ForegroundColor Green
 
 # ==== 调用 nvs_partition_gen.py 生成 bin ====
 Write-Host "正在生成 NVS bin 文件..." -ForegroundColor Cyan
-& $IDF_PYTHON $NVS_TOOL generate $CsvFile $BinFile $PartitionSize --version 2
+& $IdfPython $NVS_TOOL generate $CsvFile $BinFile $PartitionSize --version 2
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] nvs_partition_gen.py 生成失败 (exit=$LASTEXITCODE)" -ForegroundColor Red
     exit 1
@@ -88,9 +127,9 @@ Write-Host "[OK] NVS bin 已生成: $BinFile ($binSize bytes)" -ForegroundColor 
 if ($Flash) {
     Write-Host "正在烧录到 $Port ..." -ForegroundColor Cyan
     # parttool.py 内部用 $IDF_PATH 环境变量定位 esptool.py，必须先设置
-    $env:IDF_PATH = $IDF_PATH
+    $env:IDF_PATH = $IdfPath
     # 按分区名烧录：偏移由设备上的分区表决定，my_partitions.csv 改动后无需改本脚本
-    & $IDF_PYTHON $PARTTOOL `
+    & $IdfPython $PARTTOOL `
         --port $Port --baud 460800 `
         write_partition --partition-name $PartitionName --input $BinFile
 
