@@ -548,6 +548,38 @@ uint16_t crc16_compute(uint8_t const *p_data, uint32_t size)
 	return crc;
 }
 
+/* 睡眠报告入队。队列满时返回 -1，QoS 0 不会重传，末包会在云端消失。
+ * 这里等到能入队为止。QoS 1 由 MQTT 任务重发，直到 broker 确认。 */
+static int sleep_report_mqtt_publish(const char *payload)
+{
+    int msg_id = -1;
+    int tries;
+    int payload_len;
+
+    if (payload == NULL) {
+        return -1;
+    }
+    payload_len = (int)strlen(payload);
+    for (tries = 0; tries < 80; tries++) {
+        if (!get_mqtt_status()) {
+            return -1;
+        }
+        if (mqtt_send_mutex == true) {
+            mqtt_send_mutex = false;
+            msg_id = esp_mqtt_client_publish(client, user_sleep_data_publish_topic,
+                                             payload, payload_len, 1, 0);
+            mqtt_send_mutex = true;
+        } else {
+            msg_id = -1;
+        }
+        if (msg_id >= 0) {
+            return msg_id;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return -1;
+}
+
 void report_to_aliyun(uint8_t type, uint8_t *value, uint16_t len)
 {
     if (!value || len == 0) return;
@@ -562,6 +594,7 @@ void report_to_aliyun(uint8_t type, uint8_t *value, uint16_t len)
     cJSON *firstItem = NULL, *secondItem = NULL, *thirdItem = NULL;
     char *p_str = NULL;
     uint16_t this_len;
+    int msg_id;
     if((len % one_packet_len) != 0)
         packet_num ++;
     printf("%u packet to report_to_aliyun type=%u len=%u\n", (unsigned)packet_num, (unsigned)type, (unsigned)len);
@@ -602,23 +635,18 @@ void report_to_aliyun(uint8_t type, uint8_t *value, uint16_t len)
             continue;
         }
         cJSON_Minify(p_str);
-        printf("report put type=%u packet=%u/%u bytes=%u\n",
-               (unsigned)type, (unsigned)i, (unsigned)packet_num, (unsigned)strlen(p_str));
-        if(get_mqtt_status())
-        {
-            if(mqtt_send_mutex == true)
-            {
-                mqtt_send_mutex = false;
-                esp_mqtt_client_publish(client, user_sleep_data_publish_topic, (char *)p_str, strlen((char *)p_str), 0, 0);
-                mqtt_send_mutex = true;
-            }
-            else
-            {
-                printf("mqtt_send_mutex2\n");
-            }
+        msg_id = sleep_report_mqtt_publish(p_str);
+        if (msg_id < 0) {
+            printf("report put fail type=%u packet=%u/%u bytes=%u\n",
+                   (unsigned)type, (unsigned)i, (unsigned)packet_num, (unsigned)strlen(p_str));
+            free(p_str);
+            break;
         }
+        printf("report put type=%u packet=%u/%u bytes=%u id=%d\n",
+               (unsigned)type, (unsigned)i, (unsigned)packet_num, (unsigned)strlen(p_str), msg_id);
         free(p_str);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* 先让 MQTT 任务把这一包写出，避免 21 包同时堆在内部 RAM。 */
+        vTaskDelay(pdMS_TO_TICKS(80));
     }
 }
 void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
@@ -695,15 +723,8 @@ void single_cmd_parse(uint8_t *value, uint16_t len, uint8_t type)
                                                                                                         );
            //  printf("%s\n",send_json_value);
           
-            if(get_mqtt_status())
-            {
-                if(mqtt_send_mutex == true)
-                {
-                    mqtt_send_mutex = false;
-                    // printf("%s\n",send_json_value);
-                    esp_mqtt_client_publish(client, user_sleep_data_publish_topic, (char *)send_json_value, strlen((char *)send_json_value), 0, 0);
-                    mqtt_send_mutex = true;
-                }
+            if (sleep_report_mqtt_publish(send_json_value) < 0) {
+                printf("report put fail type=5\n");
             }
         }
         free(m_sleep_cycle_pb_msg_de);
@@ -1127,8 +1148,9 @@ void snoring_detection_func(void)
         total_count += device_info->snore->snore_state.snoring_block[i];
     }
     
-    // 若2分钟内打鼾包数量达到阈值，则触发打鼾事件
-    if (total_count >= device_info->snore->snore_parameters.threshold) {
+    /* threshold 为 0 表示关闭。不能用 >= 0，否则每 5 秒都会触发干预。 */
+    if (device_info->snore->snore_parameters.threshold != 0 &&
+        total_count >= device_info->snore->snore_parameters.threshold) {
         device_info->snore->snore_state.triggered_flag = true;
     }
 
@@ -2919,6 +2941,49 @@ static void handle_snore_trigger_task(void *arg)
 }
 
 
+/* 上报当前打鼾参数。查询和 APP 设置写入 NVS 后共用同一条报文。 */
+static int publish_current_snore_param(void)
+{
+    char *send_json_value = (char *)malloc(512);
+    if (send_json_value == NULL) {
+        printf("内存分配失败！\n");
+        return -1;
+    }
+    memset(send_json_value, 0, 512);
+    sprintf(send_json_value, "{\"id\":\"%s\",\"ts\":%d,\"type\":16,\"report\":\"snore_param\",\"data\":{"
+                            "\"triggered_flag\":%d,"
+                            "\"triggered_flag_demo\":%d,"
+                            "\"upHoldTime\":%d,"
+                            "\"threshold\":%d,"
+                            "\"threshold5s\":%d,"
+                            "\"pwm\":%d,"
+                            "\"tmr\":%d,"
+                            "\"lastTriggeredTime\":%d,"
+                            "\"isIntervening\":%d}}",
+                            device_info->id,
+                            device_info->utc.time_stamp,
+                            device_info->snore->snore_state.triggered_flag,
+                            device_info->snore->snore_state.triggered_flag_demo,
+                            device_info->snore->snore_parameters.up_hold_time_s,
+                            device_info->snore->snore_parameters.threshold,
+                            device_info->snore->snore_parameters.threshold_5s,
+                            device_info->snore->snore_parameters.pwm,
+                            device_info->snore->snore_parameters.tmr,
+                            device_info->snore->snore_state.last_triggered_time_s,
+                            device_info->snore->snore_state.is_intervening);
+
+    printf("mqtt put打鼾干预参数: %s\n", send_json_value);
+    if (get_mqtt_status()) {
+        if (mqtt_send_mutex == true) {
+            mqtt_send_mutex = false;
+            esp_mqtt_client_publish(client, mc_cli_data_publish_topic, send_json_value, strlen(send_json_value), 0, 0);
+            mqtt_send_mutex = true;
+        }
+    }
+    free(send_json_value);
+    return 0;
+}
+
 /*
  *  解析MQTT/BLE 数据包
  *  data: AA010805010100000000f8XX
@@ -2930,56 +2995,14 @@ int mqtt_ble_data_parser_cb(uint8_t *data)
     {
         // 要加入和校验的（现在还没加）
         nvs_handle nvs_config_handler;
-        char *send_json_value = NULL;
         // 解析
         switch (data[1])                            
         {
             case 0x00:
                 if(data[4] == 0x01)     // 打鼾干预参数查询
                 {
-                    send_json_value = (char *)malloc(512);
-                    if (send_json_value == NULL) {
-                        printf("内存分配失败！\n");
-                        return -1;
-                    }
-                    memset(send_json_value, 0, 512);
                     check_stack_space();
-                    // 构建 JSON 字符串
-                    sprintf(send_json_value, "{\"id\":\"%s\",\"ts\":%d,\"type\":16,\"report\":\"snore_param\",\"data\":{"
-                                            "\"triggered_flag\":%d,"
-                                            "\"triggered_flag_demo\":%d,"
-                                            "\"upHoldTime\":%d,"
-                                            "\"threshold\":%d,"
-                                            "\"threshold5s\":%d,"
-                                            "\"pwm\":%d,"
-                                            "\"tmr\":%d,"
-                                            "\"lastTriggeredTime\":%d,"
-                                            "\"isIntervening\":%d}}",             
-                                            device_info->id,
-                                            device_info->utc.time_stamp,
-                                            device_info->snore->snore_state.triggered_flag,                  
-                                            device_info->snore->snore_state.triggered_flag_demo,
-                                            device_info->snore->snore_parameters.up_hold_time_s,
-                                            device_info->snore->snore_parameters.threshold,
-                                            device_info->snore->snore_parameters.threshold_5s,
-                                            device_info->snore->snore_parameters.pwm,
-                                            device_info->snore->snore_parameters.tmr,
-                                            device_info->snore->snore_state.last_triggered_time_s,
-                                            device_info->snore->snore_state.is_intervening);
-                    
-                    printf("mqtt put打鼾干预参数: %s\n", send_json_value);
-
-                    // MQTT 发送
-                    if (get_mqtt_status()) {
-                        if (mqtt_send_mutex == true) {
-                            mqtt_send_mutex = false;
-                            esp_mqtt_client_publish(client, mc_cli_data_publish_topic, (char *)send_json_value, strlen((char *)send_json_value), 0, 0);
-                            mqtt_send_mutex = true;
-                        }
-                    }
-                    if (send_json_value != NULL) {
-                        free(send_json_value);
-                    }
+                    return publish_current_snore_param();
                 }else if(data[4] == 0x02) // 主控盒参数查询
                 {
                     // printf("查询主控盒参数\n");
@@ -3046,6 +3069,8 @@ int mqtt_ble_data_parser_cb(uint8_t *data)
                 ESP_ERROR_CHECK(nvs_set_blob(nvs_config_handler, "snore_param",  &device_info->snore->snore_parameters, sizeof(snore_parameters_t)));
                 ESP_ERROR_CHECK(nvs_commit(nvs_config_handler));
                 nvs_close(nvs_config_handler);
+                /* NVS 写入成功后再上报，APP 不用另发查询。 */
+                publish_current_snore_param();
                 break;
 
             case 0x04:

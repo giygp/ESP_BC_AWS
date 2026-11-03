@@ -128,14 +128,14 @@
 
 // 打鼾干预
 #define BLOCK_BUFFER_SIZE           24      // 2分钟内，共24次更新（每5秒一次）
-#define SNORING_THRESHOLD           15      // 2分钟内打鼾阈值
+#define SNORING_THRESHOLD           0       // 0=关闭。非 0 时为 2 分钟内打鼾包阈值
 #define SNORING_THRESHOLD_5S        1       // 5秒内打鼾阈值
 #define SNORE_COOLDOWN_SECONDS      1800    // 打鼾干预持续时间 30分钟=1800秒
 
 #define  UP_HOLD_TIME_S             1800    // 打鼾干预持续时间 30分钟=1800秒
 #define  UP_HOLD_TIME_S_DEMO        120      // 打鼾演示流程冷却时间（秒）
 #define  THRESHOLD_5S               1       // 5秒有一个打鼾包就判断为该包打鼾
-#define  THRESHOLD                  15      // 2分钟内打鼾包阈值 2分钟15个则判断为打鼾 进行打鼾干预
+#define  THRESHOLD                  0       // 0=默认关闭打鼾干预。非 0 时，2 分钟内打鼾包达到该值才抬头
 #define  SNORING_PWM                80      // 打鼾干预PWM值 （速度）
 #define  SNORING_TMR                20      // 打鼾演示流程抬起时间（时间 s） 
 
