@@ -21,12 +21,33 @@
 #include "common.h"
 #include "app_control.h"
 #include "use_uart.h"
+#include "cJSON.h"
+#include "esp_heap_caps.h"
 // #include "esp_log.h"
 
+/* cJSON 节点都很小，默认会进内部 RAM。报告一包 200 个数就会拆碎 TLS 需要的连续空间。 */
+static void *cjson_malloc_spiram(size_t sz)
+{
+    void *p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p == NULL) {
+        p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+    }
+    return p;
+}
 
+static void cjson_free_any(void *p)
+{
+    heap_caps_free(p);
+}
 
 void app_main(void)
 {
+  cJSON_Hooks hooks = {
+      .malloc_fn = cjson_malloc_spiram,
+      .free_fn = cjson_free_any,
+  };
+  cJSON_InitHooks(&hooks);
+
   //初始化 NVS
   vTaskDelay(500 / portTICK_PERIOD_MS);
 	esp_err_t ret = nvs_flash_init();
